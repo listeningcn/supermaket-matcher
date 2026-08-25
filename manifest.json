@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Supermarket Price Matcher",
+  "version": "1.0",
+  "action": {
+    "default_popup": "compare.html"
+  },
+  "permissions": [
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback"
+  ],
+  "host_permissions": [
+    "https://*.woolworths.com.au/*",
+    "https://*.coles.com.au/*",
+    "https://*.aldi.com.au/*"
+  ]
+}

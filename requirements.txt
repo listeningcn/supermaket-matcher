@@ -1,0 +1,4 @@
+# Required to bypass Coles (Imperva) and Aldi (Akamai) bot protection, which
+# blocks plain urllib requests at the TLS fingerprint level. curl_cffi lets us
+# impersonate a real Chrome TLS/JA3 fingerprint.
+curl_cffi
