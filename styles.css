@@ -111,15 +111,16 @@ th { background-color: #f1f1f1; }
 }
 
 .current-price {
-    font-weight: bold;
-    font-size: 1.05em;
-    color: #111;
+    font-weight: normal;
+    font-size: 0.85em;
+    color: #666;
 }
 
 .unit-price {
-    color: #666;
-    font-size: 0.78em;
-    margin-top: 2px;
+    font-weight: bold;
+    color: #111;
+    font-size: 1.05em;
+    margin-bottom: 2px;
 }
 
 .discount-badge {

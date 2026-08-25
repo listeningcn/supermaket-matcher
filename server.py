@@ -3,14 +3,10 @@
 
 from __future__ import annotations
 
-import gzip
-import http.cookiejar
 import json
 import re
-import ssl
 import urllib.error
 import urllib.parse
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -21,36 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 ROOT = Path(__file__).resolve().parent
 PORT = 8765
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
 
-SSL_CONTEXT = ssl.create_default_context()
-BROWSER_HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-AU,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"macOS"',
-}
-
-
-def _make_opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
-        urllib.request.HTTPSHandler(context=SSL_CONTEXT),
-    )
-
-
-WW_OPENER = _make_opener()
 COLES_BUILD_ID: str | None = None
 
 # curl_cffi sessions impersonate a real Chrome TLS/JA3 fingerprint, which is what
@@ -66,6 +33,7 @@ COLES_BUILD_ID: str | None = None
 # from curl_cffi's supported list (or check for a newer curl_cffi release that
 # adds a fresh, not-yet-fingerprinted impersonation target).
 CURL_IMPERSONATE = "chrome120"
+WW_CURL_SESSION = curl_requests.Session(impersonate=CURL_IMPERSONATE) if curl_requests else None
 COLES_CURL_SESSION = curl_requests.Session(impersonate=CURL_IMPERSONATE) if curl_requests else None
 ALDI_CURL_SESSION = curl_requests.Session(impersonate=CURL_IMPERSONATE) if curl_requests else None
 
@@ -94,26 +62,11 @@ def curl_request(
     return response.text
 
 
-def http_request(
-    url: str,
-    *,
-    data: bytes | None = None,
-    headers: dict | None = None,
-    opener: urllib.request.OpenerDirector | None = None,
-) -> bytes:
-    req_headers = dict(BROWSER_HEADERS)
-    if headers:
-        req_headers.update(headers)
-    request = urllib.request.Request(url, data=data, headers=req_headers)
-    with (opener or WW_OPENER).open(request, timeout=25) as response:
-        raw = response.read()
-        if response.headers.get("Content-Encoding") == "gzip":
-            raw = gzip.decompress(raw)
-        return raw
-
-
 def search_woolworths(keyword: str) -> list[dict]:
-    http_request("https://www.woolworths.com.au/")
+    # Woolworths also blocks plain urllib at the TLS fingerprint level (raises
+    # "EOF occurred in violation of protocol"), so use curl_cffi's Chrome
+    # impersonation here too, same as Coles and Aldi.
+    curl_request(WW_CURL_SESSION, "https://www.woolworths.com.au/")
     payload = json.dumps(
         {
             "SearchTerm": keyword,
@@ -125,8 +78,10 @@ def search_woolworths(keyword: str) -> list[dict]:
             "Location": f"/shop/search/products?searchTerm={urllib.parse.quote(keyword)}",
         }
     ).encode()
-    raw = http_request(
+    raw = curl_request(
+        WW_CURL_SESSION,
         "https://www.woolworths.com.au/apis/ui/Search/products",
+        method="POST",
         data=payload,
         headers={
             "Content-Type": "application/json",
@@ -135,7 +90,7 @@ def search_woolworths(keyword: str) -> list[dict]:
             "Referer": f"https://www.woolworths.com.au/shop/search/products?searchTerm={urllib.parse.quote(keyword)}",
         },
     )
-    data = json.loads(raw.decode("utf-8"))
+    data = json.loads(raw)
     products = []
     for group in data.get("Products") or []:
         items = group.get("Products") or []
@@ -305,7 +260,19 @@ def _coles_search_payload(keyword: str) -> dict:
 
 
 def search_coles(keyword: str) -> list[dict]:
-    results = (_coles_search_payload(keyword).get("results") or [])
+    global COLES_CURL_SESSION, COLES_BUILD_ID
+    try:
+        payload = _coles_search_payload(keyword)
+    except RuntimeError as exc:
+        if "bot protection" not in str(exc) or not curl_requests:
+            raise
+        # A fresh session (new cookie jar / TLS session ticket) occasionally
+        # gets past Incapsula even when the previous one was flagged. Retry
+        # once before giving up.
+        COLES_CURL_SESSION = curl_requests.Session(impersonate=CURL_IMPERSONATE)
+        COLES_BUILD_ID = None
+        payload = _coles_search_payload(keyword)
+    results = payload.get("results") or []
     products = []
     for item in results:
         if item.get("_type") != "PRODUCT" and not item.get("pricing"):
@@ -345,7 +312,14 @@ def _aldi_image(assets) -> str | None:
     if not assets:
         return None
     asset = assets[0]
-    asset_id = asset.get("assetId") or asset.get("id") if isinstance(asset, dict) else asset
+    if not isinstance(asset, dict):
+        return None
+    # Aldi's API now returns a Scene7 image URL template with "{width}" and
+    # "{slug}" placeholders instead of a bare asset id.
+    url = asset.get("url")
+    if url:
+        return url.replace("{width}", "300").replace("{slug}", "")
+    asset_id = asset.get("assetId") or asset.get("id")
     if not asset_id:
         return None
     return f"https://dm.apac.cms.aldi.cx/is/image/aldiprodapac/{asset_id}?wid=100"
@@ -462,6 +436,17 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/config.js":
             file_path = ROOT / "config.js"
+            body = file_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/app.js":
+            file_path = ROOT / "app.js"
             body = file_path.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "application/javascript; charset=utf-8")
