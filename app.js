@@ -1,5 +1,5 @@
 // Set up the 'Enter' key search listener on load
-document.getElementById('searchInput').addEventListener('keypress', function(event) {
+document.getElementById('searchInput').addEventListener('keypress', function (event) {
     if (event.key === 'Enter') {
         event.preventDefault();
         runSearch();
@@ -68,6 +68,26 @@ function classifyUnitType(product) {
     return 'unknown';
 }
 
+// Parses a unit-price string like "$3.65 / 1L", "$2.38 per 100 g", "$2.50 / 1kg",
+// or "$4.00 / each" into a common comparable basis (price per gram/mL/each),
+// so differently-sized packs can be compared on genuine value rather than sticker price.
+function normalizeUnitPrice(text) {
+    if (!text) return null;
+    const match = text.match(/\$?(\d+(?:\.\d+)?)\s*(?:\/|per)\s*(\d+(?:\.\d+)?)?\s*(kilograms?|kg|grams?|g|litres?|liters?|l|millilitres?|milliliters?|ml|each|ea)\b/i);
+    if (!match) return null;
+    const price = parseFloat(match[1]);
+    const qty = match[2] ? parseFloat(match[2]) : 1;
+    const unit = match[3].toLowerCase();
+    if (!qty || !price) return null;
+
+    if (unit.startsWith('k')) return { value: (price / qty / 1000) * 100, basis: 'weight' };
+    if (unit === 'g' || unit.startsWith('gram')) return { value: (price / qty) * 100, basis: 'weight' };
+    if (unit === 'l' || unit.startsWith('lit')) return { value: (price / qty / 1000) * 100, basis: 'volume' };
+    if (unit.startsWith('m')) return { value: (price / qty) * 100, basis: 'volume' };
+    if (unit.startsWith('ea')) return { value: price / qty, basis: 'each' };
+    return null;
+}
+
 // True when running as an installed Chrome extension (popup). Extension pages with
 // matching host_permissions are exempt from CORS, so we can call the retail sites
 // directly instead of relying on the local Python proxy.
@@ -106,7 +126,7 @@ function woolworthsDiscountText(prod, price, wasPrice) {
 
 async function searchWoolworthsDirect(keyword) {
     // Warm up cookies first (site expects a prior visit).
-    await fetch('https://www.woolworths.com.au/', { credentials: 'include' }).catch(() => {});
+    await fetch('https://www.woolworths.com.au/', { credentials: 'include' }).catch(() => { });
     const searchTerm = encodeURIComponent(keyword);
     const response = await fetch('https://www.woolworths.com.au/apis/ui/Search/products', {
         method: 'POST',
@@ -403,57 +423,58 @@ async function runSearch() {
     loading.style.display = 'block';
     resultsDiv.innerHTML = '';
 
-    const wwEnabled = RETAILER_CONFIG.woolworths.enabled;
-    const colesEnabled = RETAILER_CONFIG.coles.enabled;
-    const aldiEnabled = RETAILER_CONFIG.aldi.enabled;
+    try {
+        const wwEnabled = RETAILER_CONFIG.woolworths.enabled;
+        const colesEnabled = RETAILER_CONFIG.coles.enabled;
+        const aldiEnabled = RETAILER_CONFIG.aldi.enabled;
 
-    const [ww, coles, aldi] = await Promise.all([
-        wwEnabled ? fetchWoolworths(keyword) : Promise.resolve({ products: [], error: null }),
-        colesEnabled ? fetchColes(keyword) : Promise.resolve({ products: [], error: null }),
-        aldiEnabled ? fetchAldi(keyword) : Promise.resolve({ products: [], error: null })
-    ]);
-    const wwProducts = ww.products;
-    const colesProducts = coles.products;
-    const aldiProducts = aldi.products;
+        const [ww, coles, aldi] = await Promise.all([
+            wwEnabled ? fetchWoolworths(keyword) : Promise.resolve({ products: [], error: null }),
+            colesEnabled ? fetchColes(keyword) : Promise.resolve({ products: [], error: null }),
+            aldiEnabled ? fetchAldi(keyword) : Promise.resolve({ products: [], error: null })
+        ]);
+        const wwProducts = ww.products;
+        const colesProducts = coles.products;
+        const aldiProducts = aldi.products;
 
-    const matches = [];
-    const usedColes = new Set();
-    const usedAldi = new Set();
+        const matches = [];
+        const usedColes = new Set();
+        const usedAldi = new Set();
 
-    wwProducts.forEach(wwProd => {
-        const colesMatch = colesEnabled ? findBestMatch(wwProd, colesProducts, usedColes) : null;
-        if (colesMatch) usedColes.add(colesMatch.index);
-        const aldiMatch = aldiEnabled ? findBestMatch(wwProd, aldiProducts, usedAldi) : null;
-        if (aldiMatch) usedAldi.add(aldiMatch.index);
+        wwProducts.forEach(wwProd => {
+            const colesMatch = colesEnabled ? findBestMatch(wwProd, colesProducts, usedColes) : null;
+            if (colesMatch) usedColes.add(colesMatch.index);
+            const aldiMatch = aldiEnabled ? findBestMatch(wwProd, aldiProducts, usedAldi) : null;
+            if (aldiMatch) usedAldi.add(aldiMatch.index);
 
-        const colesProd = colesMatch ? colesMatch.product : { price: null, wasPrice: null, discountText: null };
-        const aldiProd = aldiMatch ? aldiMatch.product : { price: null, wasPrice: null, discountText: null };
+            const colesProd = colesMatch ? colesMatch.product : { price: null, wasPrice: null, discountText: null };
+            const aldiProd = aldiMatch ? aldiMatch.product : { price: null, wasPrice: null, discountText: null };
 
-        matches.push({
-            productName: wwProd.name,
-            wwProd: wwProd,
-            colesProd: colesProd,
-            aldiProd: aldiProd
+            matches.push({
+                productName: wwProd.name,
+                wwProd: wwProd,
+                colesProd: colesProd,
+                aldiProd: aldiProd
+            });
         });
-    });
 
-    if (matches.length === 0) {
-        let hint;
-        const activeErrors = [
-            wwEnabled ? ww.error : null,
-            colesEnabled ? coles.error : null,
-            aldiEnabled ? aldi.error : null,
-        ].filter(Boolean);
-        if (activeErrors.length > 0) {
-            hint = activeErrors.map(r => `⚠️ ${r}`).join('<br>');
+        if (matches.length === 0) {
+            let hint;
+            const activeErrors = [
+                wwEnabled ? ww.error : null,
+                colesEnabled ? coles.error : null,
+                aldiEnabled ? aldi.error : null,
+            ].filter(Boolean);
+            if (activeErrors.length > 0) {
+                hint = activeErrors.map(r => `⚠️ ${r}`).join('<br>');
+            } else {
+                hint = isExtensionContext()
+                    ? 'No live products found for that search term.'
+                    : 'No live products found. Start the local proxy with <code>python3 server.py</code> then search again.';
+            }
+            resultsDiv.innerHTML = `<p style="font-size:13px; color:#666;">${hint}</p>`;
         } else {
-            hint = isExtensionContext()
-                ? 'No live products found for that search term.'
-                : 'No live products found. Start the local proxy with <code>python3 server.py</code> then search again.';
-        }
-        resultsDiv.innerHTML = `<p style="font-size:13px; color:#666;">${hint}</p>`;
-    } else {
-        let tableHtml = `
+            let tableHtml = `
             <table class="product-table">
                 <thead>
                     <tr>
@@ -465,25 +486,30 @@ async function runSearch() {
                 <tbody>
         `;
 
-        matches.forEach(match => {
-            const winners = cheapestShops([
-                { shop: 'Woolworths', product: match.wwProd },
-                { shop: 'Coles', product: match.colesProd },
-                { shop: 'Aldi', product: match.aldiProd },
-            ]);
+            matches.forEach(match => {
+                const winners = cheapestShops([
+                    { shop: 'Woolworths', product: match.wwProd },
+                    { shop: 'Coles', product: match.colesProd },
+                    { shop: 'Aldi', product: match.aldiProd },
+                ]);
 
-            tableHtml += `
+                tableHtml += `
                 <tr>
                     ${wwEnabled ? `<td>${formatShopCell(match.wwProd, ww.error, winners.has('Woolworths'))}</td>` : ''}
                     ${colesEnabled ? `<td>${formatShopCell(match.colesProd, coles.error, winners.has('Coles'))}</td>` : ''}
                     ${aldiEnabled ? `<td>${formatShopCell(match.aldiProd, aldi.error, winners.has('Aldi'))}</td>` : ''}
                 </tr>
             `;
-        });
+            });
 
-        tableHtml += '</tbody></table>';
-        resultsDiv.innerHTML = tableHtml;
+            tableHtml += '</tbody></table>';
+            resultsDiv.innerHTML = tableHtml;
+        }
+    } catch (err) {
+        // Guarantees the loading indicator never gets stuck on an unexpected error.
+        console.error('Search failed unexpectedly.', err);
+        resultsDiv.innerHTML = `<p style="font-size:13px; color:#c00;">⚠️ Search failed: ${err.message || err}</p>`;
+    } finally {
+        loading.style.display = 'none';
     }
-
-    loading.style.display = 'none';
 }
